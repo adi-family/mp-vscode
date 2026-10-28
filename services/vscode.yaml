@@ -1,0 +1,83 @@
+proxy:
+  host: vscode.adi
+runner:
+  script:
+    run: |
+      set -e
+      STATE_DIR="$(pwd)/.vscode-server"
+      CACHE_DIR="$STATE_DIR/cache"
+      DATA_DIR="$STATE_DIR/data"
+      USER_DATA_DIR="$STATE_DIR/user-data"
+      EXT_DIR="$STATE_DIR/extensions"
+      TOKEN_FILE="$STATE_DIR/connection-token"
+      VERSION="1.109.5"
+
+      os="$(uname -s)"
+      arch="$(uname -m)"
+      case "$os" in
+        Linux)
+          case "$arch" in
+            x86_64) plat="linux-x64"; sha256="b433bf4f0227321a7014d8460d10a8f958adc0f45aa79bd889e84e65e8f88363" ;;
+            aarch64|arm64) plat="linux-arm64"; sha256="36d9c14036489b63de84ebace837fcacf7e60e669a0dc715802c5443684ea4dc" ;;
+            *) echo "vscode service: unsupported Linux arch '$arch'" >&2; exit 1 ;;
+          esac
+          ;;
+        *)
+          echo "vscode service: no build published upstream for OS '$os' (Linux x64/arm64 only)" >&2
+          exit 1
+          ;;
+      esac
+
+      TAG="openvscode-server-v$VERSION"
+      DIST="$TAG-$plat"
+      INSTALL_DIR="$STATE_DIR/$DIST"
+      BIN="$INSTALL_DIR/bin/openvscode-server"
+
+      mkdir -p "$CACHE_DIR" "$DATA_DIR" "$USER_DATA_DIR" "$EXT_DIR"
+
+      if [ ! -x "$BIN" ]; then
+        ARCHIVE="$CACHE_DIR/$DIST.tar.gz"
+        if [ ! -f "$ARCHIVE" ]; then
+          echo "vscode service: downloading $DIST..." >&2
+          curl -fsSL -o "$ARCHIVE.part" "https://github.com/gitpod-io/openvscode-server/releases/download/$TAG/$DIST.tar.gz"
+          mv "$ARCHIVE.part" "$ARCHIVE"
+        fi
+        echo "$sha256  $ARCHIVE" | sha256sum -c - >&2
+        rm -rf "$STATE_DIR/.extract-$DIST"
+        mkdir -p "$STATE_DIR/.extract-$DIST"
+        tar -xzf "$ARCHIVE" -C "$STATE_DIR/.extract-$DIST"
+        rm -rf "$INSTALL_DIR"
+        mv "$STATE_DIR/.extract-$DIST/$DIST" "$INSTALL_DIR"
+        rmdir "$STATE_DIR/.extract-$DIST"
+      fi
+
+      TOKEN=""
+      if command -v adi-mono >/dev/null 2>&1; then
+        TOKEN="$(adi-mono secrets read VSCODE_TOKEN 2>/dev/null || true)"
+      fi
+      if [ -n "$TOKEN" ]; then
+        umask 177
+        printf '%s' "$TOKEN" > "$TOKEN_FILE"
+        chmod 600 "$TOKEN_FILE"
+        echo "vscode service: using the VSCODE_TOKEN secret as the connection token" >&2
+      elif [ -s "$TOKEN_FILE" ]; then
+        echo "vscode service: no VSCODE_TOKEN secret set - reusing the generated token at $TOKEN_FILE" >&2
+      else
+        TOKEN="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+        umask 177
+        printf '%s' "$TOKEN" > "$TOKEN_FILE"
+        chmod 600 "$TOKEN_FILE"
+        echo "vscode service: no VSCODE_TOKEN secret set - generated a connection token, stored at $TOKEN_FILE (0600)" >&2
+      fi
+
+      WORKSPACE_DIR="${WORKSPACE_DIR:-$(pwd)}"
+
+      exec "$BIN" \
+        --host 127.0.0.1 \
+        --port "$PORT" \
+        --connection-token-file "$TOKEN_FILE" \
+        --accept-server-license-terms \
+        --server-data-dir "$DATA_DIR" \
+        --user-data-dir "$USER_DATA_DIR" \
+        --extensions-dir "$EXT_DIR" \
+        --default-folder "$WORKSPACE_DIR"
