@@ -1,2 +1,2 @@
 name = "VS Code"
-description = "A browser-based VS Code (openvscode-server), proxied behind the front door."
+description = "A browser-based VS Code (Microsoft's `code serve-web`, pinned + sha256-verified), proxied behind the front door. Starting it accepts the VS Code Server licence (own/team use only); telemetry is on by default."

@@ -1,83 +1,146 @@
 proxy:
   host: vscode.adi
+# `code serve-web` licenses itself to Microsoft's VS Code Server Licence Terms
+# (https://aka.ms/vscode-server-license) the moment it is started with
+# --accept-server-license-terms below, which this service does on every start.
+# Starting this service is accepting that licence on behalf of whoever runs it.
+environment:
+  static:
+    VSCODE_BOOTSTRAP: |
+      (async () => {
+      const fs = await import("fs");
+      const path = await import("path");
+      const crypto = await import("crypto");
+      const { execFileSync, spawn } = await import("child_process");
+
+      const COMMIT = "c4453f8ea430795f941c1b2ff6c9321135a74a02"; // Stable 1.145.2, pinned
+
+      const PINS = {
+        "linux-x64":    { file: "vscode_cli_linux_x64_cli.tar.gz",   kind: "tar", sha256: "12dfe0c26bc03ff8862dc4208fef105db518a7026b5ad652b158d70424538b90" },
+        "linux-arm64":  { file: "vscode_cli_linux_arm64_cli.tar.gz", kind: "tar", sha256: "282dbd5e20bd1fcf4bc4b77c61c309795915075db0fe8680f9c1958b4c6b1b0a" },
+        "darwin-x64":   { file: "vscode_cli_darwin_x64_cli.zip",     kind: "zip", sha256: "31d23a3b839a2fd356d554f9fc3beec3d88493b6745bddc29f8241d400e6d633" },
+        "darwin-arm64": { file: "vscode_cli_darwin_arm64_cli.zip",   kind: "zip", sha256: "57644abd99a137c2b71864f32812c934beb7892957dc68d2003f4ac125b4940a" },
+        "win32-x64":    { file: "vscode_cli_win32_x64_cli.zip",      kind: "zip", sha256: "c3b7e55fc45b666ab1d7eb0fc6011d45f6033096e9f60611b769f5f90297c72d" },
+        "win32-arm64":  { file: "vscode_cli_win32_arm64_cli.zip",    kind: "zip", sha256: "1e21985fac5641623584ebae272de822a9bf2b2e65a45af690f9eebf57aa73a8" },
+      };
+
+      function platKey() {
+        const p = process.platform; // 'linux' | 'darwin' | 'win32'
+        const a = process.arch === "arm64" ? "arm64" : "x64";
+        return `${p}-${a}`;
+      }
+
+      function sha256File(file) {
+        const hash = crypto.createHash("sha256");
+        hash.update(fs.readFileSync(file));
+        return hash.digest("hex");
+      }
+
+      async function download(url, dest) {
+        const res = await fetch(url, { redirect: "follow" });
+        if (!res.ok) throw new Error(`download failed: ${res.status} ${url}`);
+        const buf = Buffer.from(await res.arrayBuffer());
+        fs.writeFileSync(dest, buf);
+      }
+
+      function extract(archive, kind, destDir) {
+        fs.rmSync(destDir, { recursive: true, force: true });
+        fs.mkdirSync(destDir, { recursive: true });
+        if (kind === "tar") {
+          execFileSync("tar", ["-xzf", archive, "-C", destDir]);
+        } else if (process.platform === "win32") {
+          const ps = "Expand-Archive -LiteralPath $env:VSCODE_ARCHIVE -DestinationPath $env:VSCODE_DEST -Force";
+          execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+            env: { ...process.env, VSCODE_ARCHIVE: archive, VSCODE_DEST: destDir },
+          });
+        } else {
+          execFileSync("unzip", ["-q", "-o", archive, "-d", destDir]);
+        }
+      }
+
+      try {
+        const key = platKey();
+        const pin = PINS[key];
+        if (!pin) {
+          console.error(`vscode service: unsupported platform/arch '${key}'`);
+          process.exit(1);
+        }
+
+        const stateDir = path.join(process.cwd(), ".vscode-cli");
+        const cacheDir = path.join(stateDir, "cache");
+        const cliDataDir = path.join(stateDir, "cli-data");
+        const dataDir = path.join(stateDir, "server-data");
+        const tokenFile = path.join(stateDir, "connection-token");
+        const installDir = path.join(stateDir, `cli-${COMMIT}-${key}`);
+        const binName = process.platform === "win32" ? "code.exe" : "code";
+        const bin = path.join(installDir, binName);
+
+        for (const d of [stateDir, cacheDir, cliDataDir, dataDir]) fs.mkdirSync(d, { recursive: true });
+
+        if (!fs.existsSync(bin)) {
+          const archivePath = path.join(cacheDir, pin.file);
+          if (!fs.existsSync(archivePath)) {
+            console.error(`vscode service: downloading ${pin.file}...`);
+            await download(`https://update.code.visualstudio.com/commit:${COMMIT}/cli-${key}/stable`, archivePath + ".part");
+            fs.renameSync(archivePath + ".part", archivePath);
+          }
+          const actual = sha256File(archivePath);
+          if (actual !== pin.sha256) {
+            fs.rmSync(archivePath, { force: true });
+            console.error(`vscode service: sha256 mismatch for ${pin.file}: expected ${pin.sha256}, got ${actual}`);
+            process.exit(1);
+          }
+          extract(archivePath, pin.kind, installDir);
+          if (process.platform !== "win32") fs.chmodSync(bin, 0o755);
+        }
+
+        let token = "";
+        try {
+          token = execFileSync("adi-mono", ["secrets", "read", "VSCODE_TOKEN"], { encoding: "utf8" }).trim();
+        } catch {}
+        if (token) {
+          fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+        } else if (fs.existsSync(tokenFile) && fs.statSync(tokenFile).size > 0) {
+          // reuse the token generated on a previous start
+        } else {
+          token = crypto.randomBytes(32).toString("hex");
+          fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+          console.error(`vscode service: no VSCODE_TOKEN secret set - generated a connection token, stored at ${tokenFile} (0600)`);
+        }
+
+        const workspaceDir = process.env.WORKSPACE_DIR || process.cwd();
+        const telemetryOff = (process.env.VSCODE_TELEMETRY || "").toLowerCase() === "off";
+
+        const args = [
+          "serve-web",
+          "--host", "127.0.0.1",
+          "--port", String(process.env.PORT),
+          "--connection-token-file", tokenFile,
+          "--accept-server-license-terms",
+          "--server-data-dir", dataDir,
+          "--cli-data-dir", cliDataDir,
+          "--default-folder", workspaceDir,
+          "--commit-id", COMMIT,
+        ];
+        if (telemetryOff) args.push("--disable-telemetry");
+
+        const child = spawn(bin, args, { stdio: "inherit" });
+        child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
+      } catch (err) {
+        console.error(`vscode service: ${err.stack || err}`);
+        process.exit(1);
+      }
+      })();
 runner:
   script:
-    run: |
-      set -e
-      STATE_DIR="$(pwd)/.vscode-server"
-      CACHE_DIR="$STATE_DIR/cache"
-      DATA_DIR="$STATE_DIR/data"
-      USER_DATA_DIR="$STATE_DIR/user-data"
-      EXT_DIR="$STATE_DIR/extensions"
-      TOKEN_FILE="$STATE_DIR/connection-token"
-      VERSION="1.109.5"
-
-      os="$(uname -s)"
-      arch="$(uname -m)"
-      case "$os" in
-        Linux)
-          case "$arch" in
-            x86_64) plat="linux-x64"; sha256="b433bf4f0227321a7014d8460d10a8f958adc0f45aa79bd889e84e65e8f88363" ;;
-            aarch64|arm64) plat="linux-arm64"; sha256="36d9c14036489b63de84ebace837fcacf7e60e669a0dc715802c5443684ea4dc" ;;
-            *) echo "vscode service: unsupported Linux arch '$arch'" >&2; exit 1 ;;
-          esac
-          ;;
-        *)
-          echo "vscode service: no build published upstream for OS '$os' (Linux x64/arm64 only)" >&2
-          exit 1
-          ;;
-      esac
-
-      TAG="openvscode-server-v$VERSION"
-      DIST="$TAG-$plat"
-      INSTALL_DIR="$STATE_DIR/$DIST"
-      BIN="$INSTALL_DIR/bin/openvscode-server"
-
-      mkdir -p "$CACHE_DIR" "$DATA_DIR" "$USER_DATA_DIR" "$EXT_DIR"
-
-      if [ ! -x "$BIN" ]; then
-        ARCHIVE="$CACHE_DIR/$DIST.tar.gz"
-        if [ ! -f "$ARCHIVE" ]; then
-          echo "vscode service: downloading $DIST..." >&2
-          curl -fsSL -o "$ARCHIVE.part" "https://github.com/gitpod-io/openvscode-server/releases/download/$TAG/$DIST.tar.gz"
-          mv "$ARCHIVE.part" "$ARCHIVE"
-        fi
-        echo "$sha256  $ARCHIVE" | sha256sum -c - >&2
-        rm -rf "$STATE_DIR/.extract-$DIST"
-        mkdir -p "$STATE_DIR/.extract-$DIST"
-        tar -xzf "$ARCHIVE" -C "$STATE_DIR/.extract-$DIST"
-        rm -rf "$INSTALL_DIR"
-        mv "$STATE_DIR/.extract-$DIST/$DIST" "$INSTALL_DIR"
-        rmdir "$STATE_DIR/.extract-$DIST"
-      fi
-
-      TOKEN=""
-      if command -v adi-mono >/dev/null 2>&1; then
-        TOKEN="$(adi-mono secrets read VSCODE_TOKEN 2>/dev/null || true)"
-      fi
-      if [ -n "$TOKEN" ]; then
-        umask 177
-        printf '%s' "$TOKEN" > "$TOKEN_FILE"
-        chmod 600 "$TOKEN_FILE"
-        echo "vscode service: using the VSCODE_TOKEN secret as the connection token" >&2
-      elif [ -s "$TOKEN_FILE" ]; then
-        echo "vscode service: no VSCODE_TOKEN secret set - reusing the generated token at $TOKEN_FILE" >&2
-      else
-        TOKEN="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-        umask 177
-        printf '%s' "$TOKEN" > "$TOKEN_FILE"
-        chmod 600 "$TOKEN_FILE"
-        echo "vscode service: no VSCODE_TOKEN secret set - generated a connection token, stored at $TOKEN_FILE (0600)" >&2
-      fi
-
-      WORKSPACE_DIR="${WORKSPACE_DIR:-$(pwd)}"
-
-      exec "$BIN" \
-        --host 127.0.0.1 \
-        --port "$PORT" \
-        --connection-token-file "$TOKEN_FILE" \
-        --accept-server-license-terms \
-        --server-data-dir "$DATA_DIR" \
-        --user-data-dir "$USER_DATA_DIR" \
-        --extensions-dir "$EXT_DIR" \
-        --default-folder "$WORKSPACE_DIR"
+    # This line alone is run through `sh -c` on Unix and `cmd /C` on Windows
+    # (crates/adi-hive/src/runner.rs's shell_command) -- so it has to parse
+    # identically in both: no `$VAR` / `%VAR%` expansion, nothing from
+    # % ^ & | < > anywhere in it. The entire bootstrap therefore lives in
+    # VSCODE_BOOTSTRAP above -- an environment variable handed straight to the
+    # child's environment table by the Rust runner, never touched by either
+    # shell's own parser -- and this line only asks `bun` to eval it (a direct
+    # `eval`, not `new Function`, so the module's own `require`/import scope
+    # carries into the bootstrap -- `new Function` runs with no lexical scope
+    # at all and left every `require` inside it a ReferenceError).
+    run: bun -e "eval(process.env.VSCODE_BOOTSTRAP)"
