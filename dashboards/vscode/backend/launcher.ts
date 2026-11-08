@@ -74,6 +74,8 @@ export type Status = {
   panel: boolean;
   service: ServiceStatus | null;
   token: TokenSource;
+  /** Whether this machine's front door answers TLS — what lets a browser here open the editor securely. */
+  tls: boolean;
   error: string | null;
 };
 
@@ -360,7 +362,7 @@ export function demandPhase(project: string | null, id: string): Phase | null {
 
 export async function status(): Promise<Status> {
   const project = ownProject();
-  const result: Status = { dashboard: DASHBOARD_ID, project, panel: true, service: null, token: tokenSource(project), error: null };
+  const result: Status = { dashboard: DASHBOARD_ID, project, panel: true, service: null, token: tokenSource(project), tls: await frontDoorTls(), error: null };
   try {
     const install = await findInstall(project);
     const id = install?.service?.id ?? SERVICE_NAME;
@@ -408,12 +410,56 @@ export async function start(): Promise<Status> {
   return status();
 }
 
+// MARK: the scheme the editor must be opened over
+//
+// VS Code's web client signs its connection handshake with a WASM module it first decrypts with
+// `crypto.subtle` — an API browsers expose only in a secure context. Over plain `http://` on any
+// host but loopback the signing fails silently, the server answers "Unauthorized client refused",
+// and the editor sits there disconnected. So the launcher sends the browser to `https://` whenever
+// that can work: the front door terminates TLS for every routed host with a leaf it mints itself
+// (the ADI CA, trusted once per machine), and through the mesh the *viewer's* own front door does
+// the same for `*.<node>.n.adi`. Loopback is already secure and is left on `http://`.
+
+/** Whether this machine's front door answers TLS: the minted leaf exists and :443 accepts a connection. */
+export async function frontDoorTls(): Promise<boolean> {
+  if (!existsSync(join(STORE, "hive", "tls", "cert.pem"))) return false;
+  const address = (process.env.ADI_FRONTDOOR_ADDR ?? "127.0.0.53").trim() || "127.0.0.53";
+  return new Promise((done) => {
+    const timer = setTimeout(() => done(false), 1500);
+    Bun.connect({
+      hostname: address,
+      port: 443,
+      socket: {
+        open(socket) { clearTimeout(timer); socket.end(); done(true); },
+        error() { clearTimeout(timer); done(false); },
+        connectError() { clearTimeout(timer); done(false); },
+        data() {},
+        close() {},
+      },
+    }).catch(() => { clearTimeout(timer); done(false); });
+  });
+}
+
+const isLoopback = (host: string) => /^(localhost|127\.(?:\d{1,3}\.){2}\d{1,3}|\[::1\]|::1)(?::\d+)?$/i.test(host.trim());
+
+/**
+ * `https` whenever the editor can be reached that way, else `http`. Pure: the request's own host
+ * and forwarded scheme, plus whether this machine's front door offers TLS, decide it.
+ */
+export function editorScheme(requestHost: string | null | undefined, forwardedProto: string | null | undefined, tls: boolean): "http" | "https" {
+  const host = (requestHost ?? "").trim().toLowerCase();
+  if (host && isLoopback(host)) return "http";
+  if (forwardedProto?.trim().toLowerCase() === "https") return "https";
+  if (host.endsWith(FLEET_SUFFIX)) return "https";
+  return tls ? "https" : "http";
+}
+
 /**
  * The URL that opens the editor for this viewer: the service's host (mapped through the mesh when
  * the viewer came that way) with the connection token, plus VS Code's own `folder`/`workspace`
  * query, passed through when the launcher was opened with one.
  */
-export function openUrl(requestHost: string | null | undefined, serviceHost: string, token: string, search: URLSearchParams, scheme = "http"): string {
+export function openUrl(requestHost: string | null | undefined, serviceHost: string, token: string, search: URLSearchParams, scheme: "http" | "https" = "http"): string {
   const url = new URL(`${scheme}://${targetHost(requestHost, serviceHost)}/`);
   url.searchParams.set("tkn", token);
   for (const key of ["folder", "workspace"]) {

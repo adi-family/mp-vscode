@@ -106,6 +106,13 @@
           : current.token === "file"
             ? "Connection token: generated, kept in the project's .vscode-cli/."
             : "A connection token is generated the first time you open it.";
+        // The editor only connects from a secure context. A viewer on this machine gets https from
+        // the front door's own TLS; without it, say so rather than open a page that cannot connect.
+        const loopback = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])(:\d+)?$/i.test(location.host);
+        const mesh = location.hostname.endsWith(".n.adi");
+        if (!current.tls && !loopback && !mesh) {
+          tokenLine.textContent += " This machine's front door has no TLS, and VS Code cannot connect over plain http except on localhost — enable the front door's https first.";
+        }
         if (service.running) {
           if (!stay) {
             show("running", "Opening VS Code…");

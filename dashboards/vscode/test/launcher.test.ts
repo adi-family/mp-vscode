@@ -3,7 +3,21 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileToken, hiveServiceOf, installOf, openUrl, panelCandidates, panelPortOf, phaseOf, projectOf, serviceDir, targetHost } from "../backend/launcher";
+import { editorScheme, fileToken, hiveServiceOf, installOf, openUrl, panelCandidates, panelPortOf, phaseOf, projectOf, serviceDir, targetHost } from "../backend/launcher";
+
+describe("editorScheme", () => {
+  test("https wherever the editor can connect securely: the front door's TLS, a forwarded https, the mesh", () => {
+    expect(editorScheme("vscode.adi", null, true)).toBe("https");
+    expect(editorScheme("vscode.adi", "https", false)).toBe("https");
+    expect(editorScheme("vscode.studio.n.adi", null, false)).toBe("https");
+  });
+  test("loopback is a secure context already, and a front door without TLS has only http", () => {
+    expect(editorScheme("127.0.0.1:8091", null, true)).toBe("http");
+    expect(editorScheme("localhost", "https", true)).toBe("http");
+    expect(editorScheme("vscode.adi", null, false)).toBe("http");
+    expect(editorScheme(null, null, false)).toBe("http");
+  });
+});
 
 describe("panelPortOf", () => {
   test("reads the panel's http lease out of the ports registry", () => {

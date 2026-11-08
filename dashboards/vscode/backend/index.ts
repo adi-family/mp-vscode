@@ -16,7 +16,7 @@
 // A dependency-free Bun server, like every dashboard's: the hive runner injects $PORT, this process
 // binds loopback only, and the page reaches it by relative URL on the one host both services share.
 
-import { DASHBOARD_ID, DEFAULT_SERVICE_HOST, ensureToken, openUrl, ownProject, start, status } from "./launcher";
+import { DASHBOARD_ID, DEFAULT_SERVICE_HOST, editorScheme, ensureToken, frontDoorTls, openUrl, ownProject, start, status } from "./launcher";
 
 const PORT = Number(process.env.PORT ?? process.env.PORT_HTTP ?? 8092);
 const API_PREFIX = "/api";
@@ -75,7 +75,8 @@ const server = Bun.serve({
         // Fall through with the default host.
       }
       const { token } = ensureToken(ownProject());
-      const scheme = req.headers.get("x-forwarded-proto")?.toLowerCase() === "https" ? "https" : "http";
+      // VS Code needs a secure context to connect (see `editorScheme`): https wherever it can work.
+      const scheme = editorScheme(req.headers.get("host"), req.headers.get("x-forwarded-proto"), await frontDoorTls());
       return new Response(null, {
         status: 302,
         headers: { location: openUrl(req.headers.get("host"), host, token, url.searchParams, scheme), ...noStore },

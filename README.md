@@ -46,7 +46,7 @@ Once the launcher is started, VS Code is a tile on the Home grid of the control 
 3. `/api/open` copies the service live if it is still parked, resolves the connection token the
    same way the service itself does (next section) — minting and writing one if there is none yet,
    so the first start serves with a token the launcher already knows — and answers a `302` to
-   `http://vscode-server.adi/?tkn=<token>`;
+   `https://vscode-server.adi/?tkn=<token>`;
 4. the front door sees the visit, wakes the on-demand service, and holds the page ("Starting this
    service for you", reloading every two seconds) until the editor answers, then becomes it.
 
@@ -54,6 +54,18 @@ Through the mesh the same launcher at `vscode.<node>.n.adi` redirects to
 `vscode-server.<node>.n.adi` — the one address for that node's editor that resolves from where the
 viewer sits. `?stay` on the launcher's URL keeps it from handing a running editor over, for when
 you want to read the page. `?folder=<path>` and `?workspace=<path>` are passed through to VS Code.
+
+### Why https, and what it asks of the machine
+
+VS Code's web client signs its connection handshake with a WASM module that it first decrypts
+with `crypto.subtle` — an API browsers expose only in a *secure context*. Over plain `http://` on
+any host but loopback that step fails silently, the server answers "Unauthorized client refused",
+and the workbench renders but never connects (no files, no terminal). So the launcher opens the
+editor over `https://` wherever that can work: on this machine through the front door's own TLS
+(adi-hive mints a local CA and a leaf covering every routed host into `hive/tls/`; trust that CA
+once and `https://*.adi` is a secure context), and through the mesh via the viewer's own front
+door, whose leaf covers `*.<node>.n.adi`. Loopback stays `http://`, being secure already. A front
+door without TLS gets `http://` and the launcher says plainly that the editor will not connect.
 
 The launcher is two dependency-free Bun servers (`dashboards/vscode/frontend/index.ts`,
 `dashboards/vscode/backend/index.ts`), the shape every dashboard has. The backend calls the control
