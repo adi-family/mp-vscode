@@ -1,9 +1,38 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { editorScheme, fileToken, hiveServiceOf, installOf, openUrl, panelCandidates, panelPortOf, phaseOf, projectOf, serviceDir, targetHost } from "../backend/launcher";
+import { MACHINE_SETTINGS, editorScheme, fileToken, hiveServiceOf, installOf, openUrl, panelCandidates, panelPortOf, phaseOf, projectOf, seedMachineSettingsAt, serviceDir, targetHost } from "../backend/launcher";
+
+describe("machine settings", () => {
+  const parsed = () => JSON.parse(MACHINE_SETTINGS.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n")) as Record<string, unknown>;
+  test("the seeded text is valid settings JSON (comments aside) and only machine-settable keys", () => {
+    const settings = parsed();
+    expect(Object.keys(settings["files.watcherExclude"] as Record<string, boolean>)).toContain("**/.vscode-cli/**");
+    expect(settings["terminal.integrated.localEchoEnabled"]).toBe("on");
+    expect(settings["remote.autoForwardPorts"]).toBe(false);
+    // Application-scoped settings are refused in a machine settings file; none may be seeded there.
+    for (const key of Object.keys(settings)) expect(key.startsWith("extensions.") || key.startsWith("update.") || key.startsWith("telemetry.")).toBe(false);
+  });
+  test("the service yaml carries the same text", () => {
+    const yaml = readFileSync(join(import.meta.dir, "..", "..", "..", "services", "vscode.yaml"), "utf8");
+    for (const line of MACHINE_SETTINGS.split("\n").map((l) => l.trim()).filter(Boolean)) expect(yaml).toContain(line);
+  });
+  test("seeding writes once and never over an existing file, even an empty one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "vscode-settings-"));
+    try {
+      const path = join(dir, "server-data", "data", "Machine", "settings.json");
+      expect(seedMachineSettingsAt(path)).toBe("seeded");
+      expect(readFileSync(path, "utf8")).toBe(MACHINE_SETTINGS);
+      writeFileSync(path, "{}");
+      expect(seedMachineSettingsAt(path)).toBe("present");
+      expect(readFileSync(path, "utf8")).toBe("{}");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("editorScheme", () => {
   test("https wherever the editor can connect securely: the front door's TLS, a forwarded https, the mesh", () => {

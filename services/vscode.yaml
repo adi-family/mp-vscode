@@ -77,6 +77,52 @@ environment:
 
         for (const d of [stateDir, cacheDir, cliDataDir, dataDir]) fs.mkdirSync(d, { recursive: true });
 
+        // Machine-scope settings for an editor reached over a high-latency link: fewer round trips
+        // (watcher/search excludes, no git polling, no port scanning, slower hover/suggest, no
+        // code lens / inlay hints / semantic tokens, save on focus change, local terminal echo).
+        // Seeded ONCE, only when no settings file exists; the operator owns it from then on, and an
+        // empty {} keeps the defaults away. The same text lives in the launcher (dashboards/vscode),
+        // which seeds a copy that is already running; keep the two in step.
+        const machineSettings = path.join(dataDir, "data", "Machine", "settings.json");
+        if (!fs.existsSync(machineSettings)) {
+          fs.mkdirSync(path.dirname(machineSettings), { recursive: true });
+          fs.writeFileSync(machineSettings, `{
+            // Seeded once by the adi/vscode bundle for editors reached over a high-latency link.
+            // Yours to edit: nothing rewrites this file while it exists (an empty {} keeps the defaults away).
+            "files.watcherExclude": {
+              "**/.git/objects/**": true,
+              "**/.git/subtree-cache/**": true,
+              "**/node_modules/**": true,
+              "**/target/**": true,
+              "**/dist/**": true,
+              "**/.vscode-cli/**": true
+            },
+            "search.exclude": {
+              "**/node_modules": true,
+              "**/target": true,
+              "**/dist": true,
+              "**/.vscode-cli": true
+            },
+            "files.exclude": {
+              "**/.vscode-cli": true
+            },
+            "git.autorefresh": false,
+            "git.autofetch": false,
+            "remote.autoForwardPorts": false,
+            "editor.hover.delay": 600,
+            "editor.quickSuggestionsDelay": 300,
+            "editor.codeLens": false,
+            "editor.inlayHints.enabled": "off",
+            "editor.semanticHighlighting.enabled": false,
+            "editor.occurrencesHighlight": "off",
+            "editor.lightbulb.enabled": "off",
+            "files.autoSave": "onFocusChange",
+            "terminal.integrated.localEchoEnabled": "on"
+          }
+          `.replace(/^ {4}/gm, ""));
+          console.error(`vscode service: seeded ${machineSettings} with latency-friendly defaults (yours to edit; never rewritten)`);
+        }
+
         if (!fs.existsSync(bin)) {
           const archivePath = path.join(cacheDir, pin.file);
           if (!fs.existsSync(archivePath)) {

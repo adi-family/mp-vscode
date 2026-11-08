@@ -76,6 +76,8 @@ export type Status = {
   token: TokenSource;
   /** Whether this machine's front door answers TLS — what lets a browser here open the editor securely. */
   tls: boolean;
+  /** Whether the server's machine-scope settings file exists (the bundle seeds one on first open). */
+  settings: boolean;
   error: string | null;
 };
 
@@ -154,6 +156,70 @@ export function ensureToken(project: string | null): { token: string; source: To
 
 export function tokenSource(project: string | null): TokenSource {
   return readToken(project)?.source ?? "none";
+}
+
+// MARK: machine-scope settings for a high-latency link
+//
+// VS Code's remote protocol is chatty: watcher events, git polling, port scans, hovers, code lens,
+// semantic tokens — each a round trip over the editor's WebSocket. The server's *machine* settings
+// (`<server-data-dir>/data/Machine/settings.json`, applied to every browser that opens this editor)
+// are where defaults for that belong. The service bootstrap seeds them at start; this seeds a copy
+// that is already running, on its next open, so an installed editor gets them without a restart.
+// Seeded ONCE, only when no settings file exists — the operator owns it from then on, and an
+// empty `{}` keeps the defaults away. `services/vscode.yaml` carries the same text; keep them in step.
+
+export const MACHINE_SETTINGS = `{
+  // Seeded once by the adi/vscode bundle for editors reached over a high-latency link.
+  // Yours to edit: nothing rewrites this file while it exists (an empty {} keeps the defaults away).
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.git/subtree-cache/**": true,
+    "**/node_modules/**": true,
+    "**/target/**": true,
+    "**/dist/**": true,
+    "**/.vscode-cli/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/target": true,
+    "**/dist": true,
+    "**/.vscode-cli": true
+  },
+  "files.exclude": {
+    "**/.vscode-cli": true
+  },
+  "git.autorefresh": false,
+  "git.autofetch": false,
+  "remote.autoForwardPorts": false,
+  "editor.hover.delay": 600,
+  "editor.quickSuggestionsDelay": 300,
+  "editor.codeLens": false,
+  "editor.inlayHints.enabled": "off",
+  "editor.semanticHighlighting.enabled": false,
+  "editor.occurrencesHighlight": "off",
+  "editor.lightbulb.enabled": "off",
+  "files.autoSave": "onFocusChange",
+  "terminal.integrated.localEchoEnabled": "on"
+}
+`;
+
+/** Where the server keeps its machine-scope settings: `--server-data-dir` is `.vscode-cli/server-data`. */
+export function machineSettingsFile(project: string | null): string {
+  return join(serviceDir(project, STORE, process.env.ADI_PROJECTS_DIR), ".vscode-cli", "server-data", "data", "Machine", "settings.json");
+}
+
+export type SettingsState = "seeded" | "present";
+
+/** Write the defaults to `path` unless a settings file is already there. Pure in effect: idempotent. */
+export function seedMachineSettingsAt(path: string): SettingsState {
+  if (existsSync(path)) return "present";
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, MACHINE_SETTINGS);
+  return "seeded";
+}
+
+export function seedMachineSettings(project: string | null): SettingsState {
+  return seedMachineSettingsAt(machineSettingsFile(project));
 }
 
 function secretToken(): string | null {
@@ -362,7 +428,7 @@ export function demandPhase(project: string | null, id: string): Phase | null {
 
 export async function status(): Promise<Status> {
   const project = ownProject();
-  const result: Status = { dashboard: DASHBOARD_ID, project, panel: true, service: null, token: tokenSource(project), tls: await frontDoorTls(), error: null };
+  const result: Status = { dashboard: DASHBOARD_ID, project, panel: true, service: null, token: tokenSource(project), tls: await frontDoorTls(), settings: existsSync(machineSettingsFile(project)), error: null };
   try {
     const install = await findInstall(project);
     const id = install?.service?.id ?? SERVICE_NAME;
@@ -514,7 +580,14 @@ export async function handleRequest(req: Request): Promise<Response> {
     } catch {
       // Fall through with the default host.
     }
-    const { token } = ensureToken(ownProject());
+    const project = ownProject();
+    const { token } = ensureToken(project);
+    // Defaults for the link the editor is about to be used over; a no-op once a settings file exists.
+    try {
+      seedMachineSettings(project);
+    } catch {
+      // Not ours to fail the open over: the editor works without them.
+    }
     const viaMesh = req.headers.has("x-adi-fleet-petname");
     const scheme = editorScheme(req.headers.get("host"), req.headers.get("x-forwarded-proto"), await frontDoorTls(), viaMesh);
     return new Response(null, {

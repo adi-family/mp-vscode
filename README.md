@@ -161,6 +161,31 @@ Whichever token is in force, the editor is at `http://vscode-server.adi/?tkn=<to
 `?tkn=` (or with the wrong one) the server answers `403`. The launcher at `http://vscode.adi/` is
 the way there that does not require knowing it.
 
+## Defaults for a slow link
+
+VS Code's remote protocol is chatty: file-watcher events, git polling, port scanning, hovers,
+code lens, semantic tokens — each one a round trip over the editor's WebSocket, and over a mesh
+link every round trip is the network's full latency. So the bundle seeds the server's
+**machine-scope settings** (`.vscode-cli/server-data/data/Machine/settings.json`, applied to every
+browser that opens this editor) with defaults that cut the round trips:
+
+| setting | why |
+|---|---|
+| `files.watcherExclude`, `search.exclude`, `files.exclude` for `node_modules`, `.git/objects`, `target`, `dist`, `.vscode-cli` | the server's watcher pushes every event over the link; the state directory is 700 MB of nothing you edit |
+| `git.autorefresh`, `git.autofetch` off | the git extension runs on the server and rescans on every focus and edit |
+| `remote.autoForwardPorts` off | stops the periodic process and port scan |
+| `editor.hover.delay` 600, `editor.quickSuggestionsDelay` 300 | fewer requests while the cursor moves |
+| `editor.codeLens`, `editor.inlayHints.enabled`, `editor.semanticHighlighting.enabled`, `editor.occurrencesHighlight`, `editor.lightbulb.enabled` off | each is a request to the remote extension host on every edit |
+| `files.autoSave` on focus change | far fewer writes than after a delay |
+| `terminal.integrated.localEchoEnabled` on | typed characters show at once while the real echo catches up |
+
+Seeded **once**, by the service at start and by the launcher on open, and only when no settings
+file exists — after that the file is yours: edit it, or leave an empty `{}` there to keep the
+defaults away. Application-scoped settings (`extensions.*`, `telemetry.*`) cannot live in a
+machine settings file and are deliberately not seeded. The WebSocket itself already compresses
+(`permessage-deflate` is negotiated through the front door and the mesh), and the tunnel is a
+direct QUIC path when the network allows one — what remains is the round trips, which these cut.
+
 ## The workspace folder
 
 `code serve-web --default-folder` sets what opens for a request that carries no `folder=` of its
