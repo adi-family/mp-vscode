@@ -3,7 +3,20 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileToken, hiveServiceOf, installOf, openUrl, projectOf, serviceDir, targetHost } from "../backend/launcher";
+import { fileToken, hiveServiceOf, installOf, openUrl, phaseOf, projectOf, serviceDir, targetHost } from "../backend/launcher";
+
+describe("phaseOf", () => {
+  const phases = { "vscode/vscode": "running", "vscode/backend": "idle-stopped", vscode: "starting", "adi/llm-gateway": "bogus" };
+  test("reads the supervisor's phase for a project service, and a global one by bare name", () => {
+    expect(phaseOf(phases, "vscode", "vscode")).toBe("running");
+    expect(phaseOf(phases, "vscode", "backend")).toBe("idle-stopped");
+    expect(phaseOf(phases, null, "vscode")).toBe("starting");
+  });
+  test("anything it does not recognise is no phase", () => {
+    expect(phaseOf(phases, "adi", "llm-gateway")).toBeNull();
+    expect(phaseOf(phases, "other", "vscode")).toBeNull();
+  });
+});
 
 describe("projectOf", () => {
   test("reads the project the installer stamped", () => {

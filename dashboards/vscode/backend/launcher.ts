@@ -49,13 +49,18 @@ export type Install = {
   service: ServiceElement | null;
 };
 
+/** The supervisor's own word for where an on-demand service stands, as `hive/demand.json` publishes it. */
+export type Phase = "running" | "starting" | "idle-stopped";
+
 export type ServiceStatus = {
   /** The hive key the service runs under — the ledger id, `vscode` unless a collision renamed it. */
   id: string;
   /** Whether its block has been copied into a hive.yaml (installed is not started). */
   started: boolean;
-  /** Whether its port is answering right now. An on-demand service is usually not, until visited. */
+  /** Whether the editor is up right now. An on-demand service is usually not, until visited. */
   running: boolean;
+  /** The supervisor's phase, when it has published one: `starting` is a first start still downloading. */
+  phase: Phase | null;
   /** The host it answers on, or will. */
   host: string;
   /** Whether any install in this launcher's scope carries the service at all. */
@@ -247,6 +252,27 @@ export async function findHiveService(project: string | null, id: string): Promi
   return hiveServiceOf(hive.services ?? [], project, id);
 }
 
+/**
+ * The supervisor's published phase for one service, out of the flat `"<scope>/<service>": "<phase>"`
+ * map it writes to `hive/demand.json` (a global service is keyed by its bare name). This is the
+ * one place that knows a service with no declared port is up: the panel's `running` flag is
+ * decided by a listening port, and `services/vscode.yaml` declares none — the hive leases one for
+ * its proxy, which the panel does not see — so that flag stays false for the editor forever.
+ */
+export function phaseOf(phases: Record<string, unknown>, project: string | null, id: string): Phase | null {
+  const value = phases[project ? `${project}/${id}` : id];
+  return value === "running" || value === "starting" || value === "idle-stopped" ? value : null;
+}
+
+export function demandPhase(project: string | null, id: string): Phase | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(STORE, "hive", "demand.json"), "utf8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? phaseOf(parsed as Record<string, unknown>, project, id) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function status(): Promise<Status> {
   const project = ownProject();
   const result: Status = { dashboard: DASHBOARD_ID, project, panel: true, service: null, token: tokenSource(project), error: null };
@@ -254,10 +280,12 @@ export async function status(): Promise<Status> {
     const install = await findInstall(project);
     const id = install?.service?.id ?? SERVICE_NAME;
     const live = await findHiveService(project, id);
+    const phase = live ? demandPhase(project, id) : null;
     result.service = {
       id,
       started: live !== null || install?.service?.started === true,
-      running: live?.running === true,
+      running: live?.running === true || live?.state === "running" || phase === "running",
+      phase,
       host: live?.host?.trim() || DEFAULT_SERVICE_HOST,
       installed: live !== null || (install !== null && install.service !== null),
     };

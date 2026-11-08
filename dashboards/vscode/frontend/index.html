@@ -110,6 +110,9 @@
             return;
           }
           show("running", `Running at ${service.host}.`);
+        } else if (service.phase === "starting") {
+          show("idle", `Starting at ${service.host} — a first start downloads the editor. Open it to wait on its own page.`);
+          setTimeout(refresh, 3000);
         } else if (service.started) {
           show("idle", `Not running right now — it starts when you open it, at ${service.host}.`);
         } else {
