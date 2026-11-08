@@ -83,11 +83,14 @@
           const response = await fetch("/api/status", { cache: "no-store" });
           current = await response.json();
         } catch {
-          show("error", "This launcher's backend is not answering.");
+          show("error", "This launcher's backend is not answering. Retrying…");
+          setTimeout(refresh, 5000);
           return;
         }
         if (!current.panel) {
-          show("error", `The ADI control panel could not be reached: ${current.error ?? "unknown error"}.`);
+          // The panel restarts for an update now and then; keep asking rather than leave a stale verdict.
+          show("error", `The ADI control panel could not be reached: ${current.error ?? "unknown error"} Retrying…`);
+          setTimeout(refresh, 5000);
           return;
         }
         const service = current.service;

@@ -58,9 +58,13 @@ you want to read the page. `?folder=<path>` and `?workspace=<path>` are passed t
 The launcher is two dependency-free Bun servers (`dashboards/vscode/frontend/index.ts`,
 `dashboards/vscode/backend/index.ts`), the shape every dashboard has. The backend calls the control
 panel's own API (`/api/marketplace`, `/api/hive`, `/api/marketplace/start-service`) server-side;
-a page could not, since the panel refuses browser requests from other origins. It needs the service
-installed **in the same scope** (the same project, or both global): it finds the service through the
-install ledger that landed it, and the token in the directory that install's service runs in.
+a page could not, since the panel refuses browser requests from other origins. It finds the panel
+without relying on the `.adi` name, which a node without the resolver installed cannot use: the
+panel's leased loopback port in the store's `ports/registry.json` first, then the front door by its
+address (`ADI_FRONTDOOR_ADDR`) with `Host: app.<domain>`, then `http://app.<domain>` — or
+`ADI_PANEL_URL` in the backend's environment to say outright. It needs the service installed **in
+the same scope** (the same project, or both global): it finds the service through the install
+ledger that landed it, and the token in the directory that install's service runs in.
 
 **Moving from 0.2.0:** the service's host was `vscode.adi`; from 0.3.0 that is the launcher's, and
 the service answers on `vscode-server.adi`. `adi-mono marketplace update <marketplace>/vscode

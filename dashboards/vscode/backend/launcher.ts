@@ -22,8 +22,6 @@ const STORE = resolve(DASHBOARD_DIR, "..", "..");
 
 /** The private DNS zone this install answers on — `adi` for a release install, set by the supervisor. */
 export const DOMAIN = (process.env.ADI_DOMAIN ?? "adi").trim().toLowerCase() || "adi";
-/** The control panel, whose API every lookup below reads. Server-side: a page could not call it. */
-export const PANEL = `http://app.${DOMAIN}`;
 /** The service's published name in the bundle, and what the hive calls it unless a collision renamed it. */
 export const SERVICE_NAME = "vscode";
 /** Where the editor answers, as `services/vscode.yaml` declares it — the fallback when the hive has not told us yet. */
@@ -182,14 +180,101 @@ export function fileToken(path: string): string | null {
   }
 }
 
+// MARK: finding the control panel
+//
+// The panel is `app.<domain>` to a browser, but a process on the machine cannot count on that name:
+// a node whose `.adi` resolver is not installed (the panel's own front-door status says `routed:
+// false`) resolves it to nothing useful and the connection is refused. What every machine does
+// have is the store itself: the panel's loopback port is leased in `ports/registry.json` (service
+// `app`, key `http`), and the front door's address comes down from the supervisor as
+// `ADI_FRONTDOOR_ADDR`. So the panel is found, in order: an explicit `ADI_PANEL_URL`; the leased
+// loopback port; the front door by address with `Host: app.<domain>`; the name itself. Each is
+// probed with `/api/health` once and the winner kept for a minute.
+
+/** Where the panel answers: a base URL, plus the `Host` to present when the base is an address. */
+export type PanelAddress = { base: string; host?: string };
+
+/** The panel's leased loopback port, out of the ports manager's registry (`{"leases":[{service,key,port}]}`). */
+export function panelPortOf(registry: unknown): number | null {
+  const leases = (registry as { leases?: unknown } | null)?.leases;
+  if (!Array.isArray(leases)) return null;
+  const lease = leases.find((entry) => typeof entry === "object" && entry !== null && (entry as { service?: unknown }).service === "app" && (entry as { key?: unknown }).key === "http") as { port?: unknown } | undefined;
+  const port = Number(lease?.port);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function leasedPanelPort(): number | null {
+  try {
+    return panelPortOf(JSON.parse(readFileSync(join(STORE, "ports", "registry.json"), "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+/** Every address worth trying for the panel, most reliable first. Pure, so a test can hand it an environment. */
+export function panelCandidates(env: Record<string, string | undefined>, leasedPort: number | null, domain = DOMAIN): PanelAddress[] {
+  const out: PanelAddress[] = [];
+  const override = env.ADI_PANEL_URL?.trim().replace(/\/+$/, "");
+  if (override && /^https?:\/\//.test(override)) out.push({ base: override });
+  if (leasedPort) out.push({ base: `http://127.0.0.1:${leasedPort}` });
+  const frontDoor = env.ADI_FRONTDOOR_ADDR?.trim();
+  if (frontDoor) {
+    // A bare IPv6 address needs brackets in a URL; an IPv4 one, or anything already bracketed, does not.
+    const authority = frontDoor.includes(":") && !frontDoor.startsWith("[") ? `[${frontDoor}]` : frontDoor;
+    out.push({ base: `http://${authority}`, host: `app.${domain}` });
+  }
+  out.push({ base: `http://app.${domain}` });
+  return out;
+}
+
+const PANEL_TTL_MS = 60_000;
+let knownPanel: { address: PanelAddress; at: number } | null = null;
+
+async function answersAsPanel(address: PanelAddress): Promise<boolean> {
+  try {
+    const response = await fetch(`${address.base}/api/health`, {
+      headers: address.host ? { host: address.host } : {},
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!response.ok) return false;
+    const health = (await response.json()) as { ok?: unknown; service?: unknown } | null;
+    return health?.ok === true && health?.service === "adi-app";
+  } catch {
+    return false;
+  }
+}
+
+/** The panel's address, probed once and remembered; forgotten again the moment a call to it fails. */
+export async function panelAddress(): Promise<PanelAddress> {
+  if (knownPanel && Date.now() - knownPanel.at < PANEL_TTL_MS) return knownPanel.address;
+  const candidates = panelCandidates(process.env, leasedPanelPort());
+  for (const candidate of candidates) {
+    if (await answersAsPanel(candidate)) {
+      knownPanel = { address: candidate, at: Date.now() };
+      return candidate;
+    }
+  }
+  knownPanel = null;
+  throw new Error(`The ADI control panel is not answering on this machine (tried ${candidates.map((c) => c.base).join(", ")}).`);
+}
+
 /** One call to the control panel's API, JSON in and out; a non-2xx answer becomes an Error with its message. */
 export async function panel<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(`${PANEL}${path}`, {
-    method: body === undefined ? "GET" : "POST",
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(15000),
-  });
+  const address = await panelAddress();
+  let response: Response;
+  try {
+    response = await fetch(`${address.base}${path}`, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { ...(address.host ? { host: address.host } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (error) {
+    // The address that answered a minute ago is gone (the panel restarted on another port, say):
+    // forget it so the next call probes again rather than failing the same way for a minute.
+    knownPanel = null;
+    throw error;
+  }
   const text = await response.text();
   let data: unknown = null;
   try {

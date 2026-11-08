@@ -3,7 +3,39 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { fileToken, hiveServiceOf, installOf, openUrl, phaseOf, projectOf, serviceDir, targetHost } from "../backend/launcher";
+import { fileToken, hiveServiceOf, installOf, openUrl, panelCandidates, panelPortOf, phaseOf, projectOf, serviceDir, targetHost } from "../backend/launcher";
+
+describe("panelPortOf", () => {
+  test("reads the panel's http lease out of the ports registry", () => {
+    expect(panelPortOf({ leases: [{ service: "demo/app", key: "port", port: 8001 }, { service: "app", key: "http", port: 8000 }] })).toBe(8000);
+  });
+  test("anything else is no port", () => {
+    expect(panelPortOf({ leases: [{ service: "app", key: "https", port: 8443 }] })).toBeNull();
+    expect(panelPortOf({ leases: [{ service: "app", key: "http", port: "eighty" }] })).toBeNull();
+    expect(panelPortOf({ leases: "none" })).toBeNull();
+    expect(panelPortOf(null)).toBeNull();
+  });
+});
+
+describe("panelCandidates", () => {
+  test("tries the override, the leased loopback port, the front door by address, then the name", () => {
+    expect(panelCandidates({ ADI_PANEL_URL: "http://127.0.0.1:9000/", ADI_FRONTDOOR_ADDR: "127.0.0.53" }, 8000, "adi")).toEqual([
+      { base: "http://127.0.0.1:9000" },
+      { base: "http://127.0.0.1:8000" },
+      { base: "http://127.0.0.53", host: "app.adi" },
+      { base: "http://app.adi" },
+    ]);
+  });
+  test("with nothing but the name, the name is all there is", () => {
+    expect(panelCandidates({}, null, "adi")).toEqual([{ base: "http://app.adi" }]);
+  });
+  test("an IPv6 front door is bracketed and a non-http override is ignored", () => {
+    expect(panelCandidates({ ADI_PANEL_URL: "file:///x", ADI_FRONTDOOR_ADDR: "::1" }, null, "adi")).toEqual([
+      { base: "http://[::1]", host: "app.adi" },
+      { base: "http://app.adi" },
+    ]);
+  });
+});
 
 describe("phaseOf", () => {
   const phases = { "vscode/vscode": "running", "vscode/backend": "idle-stopped", vscode: "starting", "adi/llm-gateway": "bogus" };
