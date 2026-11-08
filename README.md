@@ -68,7 +68,14 @@ door, whose leaf covers `*.<node>.n.adi`. Loopback stays `http://`, being secure
 door without TLS gets `http://` and the launcher says plainly that the editor will not connect.
 
 The launcher is two dependency-free Bun servers (`dashboards/vscode/frontend/index.ts`,
-`dashboards/vscode/backend/index.ts`), the shape every dashboard has. The backend calls the control
+`dashboards/vscode/backend/index.ts`), the shape every dashboard has. Those two files, and
+`frontend/index.html`, are a dashboard's *entry points*: the platform owns them once the dashboard
+has landed, and a marketplace update rewrites every other file of the element but never these
+three (`GENERATED_DASHBOARD_FILES` in the installer). So they are thin shims that never need to
+change, and everything that does lives beside them — `backend/launcher.ts`, `frontend/serve.ts`,
+`frontend/launcher.html`. An install made from a version before 0.3.3 carries the old, fatter
+entry points; `update` leaves those as they are, so such a copy is refreshed by uninstalling and
+reinstalling the `dashboards/vscode` element. The backend calls the control
 panel's own API (`/api/marketplace`, `/api/hive`, `/api/marketplace/start-service`) server-side;
 a page could not, since the panel refuses browser requests from other origins. It finds the panel
 without relying on the `.adi` name, which a node without the resolver installed cannot use: the

@@ -446,12 +446,84 @@ const isLoopback = (host: string) => /^(localhost|127\.(?:\d{1,3}\.){2}\d{1,3}|\
  * `https` whenever the editor can be reached that way, else `http`. Pure: the request's own host
  * and forwarded scheme, plus whether this machine's front door offers TLS, decide it.
  */
-export function editorScheme(requestHost: string | null | undefined, forwardedProto: string | null | undefined, tls: boolean): "http" | "https" {
+export function editorScheme(requestHost: string | null | undefined, forwardedProto: string | null | undefined, tls: boolean, viaMesh = false): "http" | "https" {
   const host = (requestHost ?? "").trim().toLowerCase();
   if (host && isLoopback(host)) return "http";
   if (forwardedProto?.trim().toLowerCase() === "https") return "https";
-  if (host.endsWith(FLEET_SUFFIX)) return "https";
+  // A viewer on another machine: its own front door terminates TLS for `*.<node>.n.adi`, and the
+  // gateway on this side vouches for them with the fleet headers it attaches after its gate.
+  if (viaMesh || host.endsWith(FLEET_SUFFIX)) return "https";
   return tls ? "https" : "http";
+}
+
+// MARK: the routes
+//
+// Reached as /api/* on the dashboard's host; the front door forwards the path as it arrived, so the
+// mount prefix is stripped here. Three routes:
+//   GET  /api/status  — where things stand: project, service, token source, front-door TLS
+//   POST /api/start   — copy the parked service live (idempotent; an install usually already has)
+//   GET  /api/open    — 302 to the editor with the connection token; starts the service if needed
+
+const API_PREFIX = "/api";
+const noStore = { "cache-control": "no-store" };
+
+function routePath(pathname: string): string {
+  if (pathname === API_PREFIX) return "/";
+  if (pathname.startsWith(`${API_PREFIX}/`)) return pathname.slice(API_PREFIX.length);
+  return pathname;
+}
+
+function json(data: unknown, statusCode = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status: statusCode,
+    headers: { "content-type": "application/json; charset=utf-8", ...noStore },
+  });
+}
+
+function failure(error: unknown): Response {
+  const code = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 502;
+  return json({ error: error instanceof Error ? error.message : String(error) }, code);
+}
+
+/** Every request the backend's entry point receives. */
+export async function handleRequest(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const path = routePath(url.pathname);
+
+  if (path === "/health") return json({ ok: true, dashboard: DASHBOARD_ID });
+
+  if (req.method === "GET" && path === "/status") return json(await status());
+
+  if (req.method === "POST" && path === "/start") {
+    try {
+      return json(await start());
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
+  if (req.method === "GET" && path === "/open") {
+    // Best effort on the service side: a parked service is copied live first, and a panel that
+    // cannot be reached still gets a redirect to the service's declared host — the front door's
+    // own pages say what is wrong there better than a JSON error here would.
+    let host = DEFAULT_SERVICE_HOST;
+    try {
+      let current = await status();
+      if (current.service?.installed && !current.service.started) current = await start();
+      if (current.service?.host) host = current.service.host;
+    } catch {
+      // Fall through with the default host.
+    }
+    const { token } = ensureToken(ownProject());
+    const viaMesh = req.headers.has("x-adi-fleet-petname");
+    const scheme = editorScheme(req.headers.get("host"), req.headers.get("x-forwarded-proto"), await frontDoorTls(), viaMesh);
+    return new Response(null, {
+      status: 302,
+      headers: { location: openUrl(req.headers.get("host"), host, token, url.searchParams, scheme), ...noStore },
+    });
+  }
+
+  return json({ error: "not found" }, 404);
 }
 
 /**

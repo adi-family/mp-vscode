@@ -11,6 +11,9 @@ describe("editorScheme", () => {
     expect(editorScheme("vscode.adi", "https", false)).toBe("https");
     expect(editorScheme("vscode.studio.n.adi", null, false)).toBe("https");
   });
+  test("a viewer the gateway vouched for (fleet headers) is on another machine, whose front door has TLS", () => {
+    expect(editorScheme("vscode.adi", null, false, true)).toBe("https");
+  });
   test("loopback is a secure context already, and a front door without TLS has only http", () => {
     expect(editorScheme("127.0.0.1:8091", null, true)).toBe("http");
     expect(editorScheme("localhost", "https", true)).toBe("http");
