@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VS Code</title>
+    <style>
+      /* ADI design tokens — the same snapshot every plain dashboard carries (design/tokens.css in
+         adi-family/mono): surfaces and hairlines, sentence case, mono for machine strings only. */
+      :root {
+        --bg-side: #101010; --bg: #161616; --bg-hover: #1B1B1B; --bg-raise: #1E1E1E; --bg-active: #232323;
+        --line: rgba(255,255,255,.07); --line-strong: rgba(255,255,255,.13);
+        --ink: #ECEAE6; --ink-2: #A9A6A0; --ink-3: #6F6C67; --code: #D6D3CD;
+        --accent: #E8532A; --accent-hover: #F05F35;
+        --ok: #4CB77A; --warn: #E0A84B; --err: #E25C5C;
+        --sans: "Geist", system-ui, sans-serif; --mono: "Geist Mono", ui-monospace, monospace;
+        --r: 6px; --r-lg: 10px; --r-pill: 999px;
+        color-scheme: dark;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg-side: #F4F3F0; --bg: #FBFAF8; --bg-hover: #F1EFEB; --bg-raise: #FFFFFF; --bg-active: #EBE8E2;
+          --line: rgba(0,0,0,.07); --line-strong: rgba(0,0,0,.13);
+          --ink: #17150F; --ink-2: #55514A; --ink-3: #8C8780; --code: #3D3A34;
+          --accent: #D6431C; --accent-hover: #C23A15;
+          color-scheme: light;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; background: var(--bg); }
+      body { margin: 0; font-family: var(--sans); color: var(--ink); display: grid; place-items: center; padding: 24px; }
+      main { width: min(100%, 440px); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 28px 28px 24px; display: grid; gap: 14px; justify-items: center; text-align: center; }
+      .mark { width: 56px; height: 56px; }
+      h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+      p { margin: 0; font-size: 14px; line-height: 1.5; color: var(--ink-2); }
+      .status { min-height: 1.5em; }
+      .status[data-state="running"]::before, .status[data-state="idle"]::before, .status[data-state="parked"]::before, .status[data-state="missing"]::before, .status[data-state="error"]::before {
+        content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; background: var(--ink-3);
+      }
+      .status[data-state="running"]::before { background: var(--ok); }
+      .status[data-state="idle"]::before, .status[data-state="parked"]::before { background: var(--warn); }
+      .status[data-state="missing"]::before, .status[data-state="error"]::before { background: var(--err); }
+      .btn { display: inline-flex; align-items: center; gap: 8px; margin-top: 4px; padding: 10px 18px; border-radius: var(--r-pill); background: var(--accent); color: #fff; font: 500 14px/1 var(--sans); text-decoration: none; }
+      .btn:hover { background: var(--accent-hover); }
+      .btn[aria-disabled="true"] { background: var(--bg-active); color: var(--ink-3); pointer-events: none; }
+      .btn svg { width: 14px; height: 14px; }
+      .fine { font-size: 12px; color: var(--ink-3); }
+      .fine code { font-family: var(--mono); color: var(--code); font-size: 11.5px; }
+      .fine a { color: var(--ink-2); text-decoration: underline; text-underline-offset: 3px; }
+      .fine a:hover { color: var(--ink); }
+      .stack { display: grid; gap: 6px; }
+    </style>
+  </head>
+  <body>
+    <main aria-labelledby="title">
+      <svg class="mark" viewBox="0 0 48 48" aria-hidden="true"><rect width="48" height="48" rx="10" fill="#1e1e1e"/><path d="M34 6 14 24 6 18v12l8-6 20 18 8-4V10z" fill="#07a9f9"/><path d="M34 6 14 24 34 42V6z" fill="#007ACC"/></svg>
+      <h1 id="title">VS Code</h1>
+      <p id="status" class="status" role="status" aria-live="polite">Checking…</p>
+      <a id="open" class="btn" href="/api/open">
+        Open VS Code
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></svg>
+      </a>
+      <div class="stack">
+        <p id="token" class="fine"></p>
+        <p class="fine">Opening it starts Microsoft's <code>code serve-web</code>, which accepts the <a href="https://aka.ms/vscode-server-license" rel="noopener noreferrer" target="_blank">VS Code Server licence</a> for your own or your team's use. A first start downloads the editor and takes a minute.</p>
+      </div>
+    </main>
+    <script>
+      const statusLine = document.getElementById("status");
+      const tokenLine = document.getElementById("token");
+      const open = document.getElementById("open");
+      // `?stay` keeps the page from handing a running editor straight over — for reading this page.
+      const stay = new URLSearchParams(location.search).has("stay");
+
+      function show(state, text) {
+        statusLine.dataset.state = state;
+        statusLine.textContent = text;
+      }
+
+      async function refresh() {
+        let current;
+        try {
+          const response = await fetch("/api/status", { cache: "no-store" });
+          current = await response.json();
+        } catch {
+          show("error", "This launcher's backend is not answering.");
+          return;
+        }
+        if (!current.panel) {
+          show("error", `The ADI control panel could not be reached: ${current.error ?? "unknown error"}.`);
+          return;
+        }
+        const service = current.service;
+        if (!service || !service.installed) {
+          show("missing", "The VS Code service is not installed in this project. Install the whole bundle, or its services/vscode element, into the same project.");
+          open.setAttribute("aria-disabled", "true");
+          tokenLine.textContent = "";
+          return;
+        }
+        open.removeAttribute("aria-disabled");
+        tokenLine.textContent = current.token === "secret"
+          ? "Connection token: the VSCODE_TOKEN secret."
+          : current.token === "file"
+            ? "Connection token: generated, kept in the project's .vscode-cli/."
+            : "A connection token is generated the first time you open it.";
+        if (service.running) {
+          if (!stay) {
+            show("running", "Opening VS Code…");
+            location.replace("/api/open");
+            return;
+          }
+          show("running", `Running at ${service.host}.`);
+        } else if (service.started) {
+          show("idle", `Not running right now — it starts when you open it, at ${service.host}.`);
+        } else {
+          show("parked", "Installed but not started. Opening it starts the service.");
+        }
+      }
+
+      refresh();
+    </script>
+  </body>
+</html>

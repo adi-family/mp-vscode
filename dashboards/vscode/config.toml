@@ -1,0 +1,4 @@
+# The one field the installer keeps from a dashboard's shipped config.toml: the picture the Home
+# grid draws it with, a Lucide icon name. Everything else here is the installing machine's to
+# write — name, project, archived state — and is overwritten when the element lands.
+icon = "code"

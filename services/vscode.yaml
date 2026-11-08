@@ -1,5 +1,5 @@
 proxy:
-  host: vscode.adi
+  host: vscode-server.adi
 # `code serve-web` licenses itself to Microsoft's VS Code Server Licence Terms
 # (https://aka.ms/vscode-server-license) the moment it is started with
 # --accept-server-license-terms below, which this service does on every start.

@@ -4,12 +4,13 @@ A full VS Code in the browser, proxied behind the front door — Microsoft's own
 the same CLI VS Code itself ships, pinned to one commit and sha256-verified before it ever runs.
 No Rust, no binary checked into this repo: the CLI is fetched from Microsoft at first start.
 
-This bundle carries two elements:
+This bundle carries three elements:
 
 | kind | name | what it is |
 |---|---|---|
-| service | `vscode` | the hive service that fetches, verifies and runs `code serve-web` |
-| project | VS Code | the project scaffold it's recommended to file the service under |
+| dashboard | `vscode` | the launcher: a tile on the Home grid at `vscode.adi` that starts the editor and opens it with its connection token |
+| service | `vscode` | the hive service that fetches, verifies and runs `code serve-web`, at `vscode-server.adi` |
+| project | VS Code | the project scaffold both are recommended to file under |
 
 Install into a project of its own:
 
@@ -17,12 +18,56 @@ Install into a project of its own:
 adi-mono marketplace install <marketplace>/vscode --new-project "VS Code"
 ```
 
-Then start it (parked services have no on/off switch to force — see `guides/services.md` — so
-install never launches it):
+That lands all three. The service is copied live in the same act (it is **on-demand**: nothing
+runs until the first visit — see "Launching it"); the launcher arrives archived, like every
+dashboard, and is started with:
 
 ```sh
-adi-mono marketplace start <marketplace>/vscode/services/vscode
+adi-mono marketplace start vscode        # the launcher's dashboard id, as `marketplace apps` lists it
 ```
+
+or from its row on the Dashboards page. If you installed with `--no-start`, the service is started
+by the launcher's first "Open", or by hand:
+
+```sh
+adi-mono marketplace start <marketplace>/vscode/services/vscode --project <id>
+```
+
+## Launching it
+
+Once the launcher is started, VS Code is a tile on the Home grid of the control panel
+(`app.adi`), the same as any other app on the machine. Opening the tile:
+
+1. loads the launcher at `http://vscode.adi/`, which asks the control panel where the service
+   stands — installed, copied live, answering;
+2. if the editor is already running, hands you straight over to it; otherwise shows one button,
+   **Open VS Code**, and says what opening it will do (a first start downloads the editor and
+   accepts the licence below);
+3. `/api/open` copies the service live if it is still parked, resolves the connection token the
+   same way the service itself does (next section) — minting and writing one if there is none yet,
+   so the first start serves with a token the launcher already knows — and answers a `302` to
+   `http://vscode-server.adi/?tkn=<token>`;
+4. the front door sees the visit, wakes the on-demand service, and holds the page ("Starting this
+   service for you", reloading every two seconds) until the editor answers, then becomes it.
+
+Through the mesh the same launcher at `vscode.<node>.n.adi` redirects to
+`vscode-server.<node>.n.adi` — the one address for that node's editor that resolves from where the
+viewer sits. `?stay` on the launcher's URL keeps it from handing a running editor over, for when
+you want to read the page. `?folder=<path>` and `?workspace=<path>` are passed through to VS Code.
+
+The launcher is two dependency-free Bun servers (`dashboards/vscode/frontend/index.ts`,
+`dashboards/vscode/backend/index.ts`), the shape every dashboard has. The backend calls the control
+panel's own API (`/api/marketplace`, `/api/hive`, `/api/marketplace/start-service`) server-side;
+a page could not, since the panel refuses browser requests from other origins. It needs the service
+installed **in the same scope** (the same project, or both global): it finds the service through the
+install ledger that landed it, and the token in the directory that install's service runs in.
+
+**Moving from 0.2.0:** the service's host was `vscode.adi`; from 0.3.0 that is the launcher's, and
+the service answers on `vscode-server.adi`. `adi-mono marketplace update <marketplace>/vscode
+--project <id>` re-lands the service block with the new host (unless you edited it — then it is
+left alone and said so, and the launcher would collide with it on `vscode.adi`), after which the
+launcher can be installed: `adi-mono marketplace install <marketplace>/vscode/dashboards/vscode
+--project <id>`.
 
 ## Licence terms — read before starting this
 
@@ -37,7 +82,8 @@ launched with `--accept-server-license-terms` on every start, which is what that
 Read the licence before the first start if that matters to you; this README cannot substitute
 for it. In particular, the licence Microsoft publishes for the VS Code Server **permits running it
 for your own use or your team's use, not hosting it as a service for third parties** — do not put
-this behind a login wall and sell seats on it.
+this behind a login wall and sell seats on it. The launcher says the same thing beside its button,
+because pressing it is the act that starts the service.
 
 **Telemetry is on by default**, the same as it is in Microsoft's own VS Code — `code serve-web`
 phones home to Microsoft unless told not to. Disable it per-start by setting `VSCODE_TELEMETRY:
@@ -63,6 +109,10 @@ The CLI version is pinned by its exact 40-hex commit (`--commit-id` on the `serv
 the same commit the six archives are downloaded for — a start never floats to whatever Microsoft
 currently calls "latest stable".
 
+The service declares no `start:` policy, so the hive's default for a proxied service applies:
+**on-demand**. It is woken by a visit to its host and stopped again after sitting idle; the
+launcher's redirect is such a visit.
+
 ## The connection token
 
 `code serve-web` refuses every request without a connection token. On each start the script:
@@ -73,6 +123,10 @@ currently calls "latest stable".
    `.vscode-cli/connection-token` (mode `0600`);
 3. failing that (first start, no secret set), generates a random 32-byte token and writes it there.
 
+The launcher resolves the token in the same order, and when neither the secret nor the file exists
+it writes a fresh one to that file before redirecting — the service then reuses it (step 2), which
+is what makes the very first open land in the editor rather than on a `403`.
+
 Set the secret yourself to pick a token you already know, and to survive the state directory being
 wiped:
 
@@ -80,8 +134,9 @@ wiped:
 adi-mono secrets set VSCODE_TOKEN   # value from stdin or --value
 ```
 
-Whichever token is in force, open `https://vscode.adi/?tkn=<token>` — without `?tkn=` (or with the
-wrong one) the server answers `403`.
+Whichever token is in force, the editor is at `http://vscode-server.adi/?tkn=<token>` — without
+`?tkn=` (or with the wrong one) the server answers `403`. The launcher at `http://vscode.adi/` is
+the way there that does not require knowing it.
 
 ## The workspace folder
 
@@ -89,7 +144,7 @@ wrong one) the server answers `403`.
 own. This service passes it `$WORKSPACE_DIR`, which defaults to the directory the service itself
 runs in — the project's directory, for a project-scoped install. Override it by setting
 `WORKSPACE_DIR` in the service's `environment.static` block in `.adi/hive.yaml` before starting,
-if you want it to open somewhere else.
+if you want it to open somewhere else — or open the launcher with `?folder=<path>` for one visit.
 
 ## Why no Rust, why no binary here
 
@@ -103,8 +158,8 @@ runtime" — stated plainly rather than papered over.
 
 ## How the bootstrap itself is written — one shell, two parsers
 
-The installer lands only this one file (`services/vscode.yaml`), so the whole bootstrap has to be
-self-contained inside it. `runner.script.run` is handed to `sh -c` on Unix and to `cmd /C` on
+The installer lands the service as one file (`services/vscode.yaml`), so the whole bootstrap has to
+be self-contained inside it. `runner.script.run` is handed to `sh -c` on Unix and to `cmd /C` on
 Windows — one string, two completely different parsers. The run line here is kept to exactly one
 thing neither parser can trip over:
 
@@ -134,10 +189,14 @@ never re-parsed by `cmd` either.
 ## Checking it works
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' https://vscode.adi/              # 403 — no token
-curl -s -o /dev/null -w '%{http_code}\n' "https://vscode.adi/?tkn=wrong"   # 403 — wrong token
-curl -s -o /dev/null -w '%{http_code}\n' "https://vscode.adi/?tkn=$TOKEN"  # 302 → the workbench
+curl -s -o /dev/null -w '%{http_code}\n' http://vscode-server.adi/              # 403 — no token (once running)
+curl -s -o /dev/null -w '%{http_code}\n' "http://vscode-server.adi/?tkn=wrong"   # 403 — wrong token
+curl -s -o /dev/null -w '%{http_code}\n' "http://vscode-server.adi/?tkn=$TOKEN"  # 302 → the workbench
+curl -s http://vscode.adi/api/status                                             # the launcher's view of the service
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://vscode.adi/api/open   # 302 http://vscode-server.adi/?tkn=…
 ```
+
+The launcher's own tests: `bun test dashboards/vscode/test`.
 
 ## Licence
 
